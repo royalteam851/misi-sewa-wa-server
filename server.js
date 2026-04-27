@@ -6,7 +6,7 @@ const { Client, LocalAuth } = require("whatsapp-web.js");
 const app = express();
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
 
 const PORT = process.env.PORT || 3000;
 
@@ -43,16 +43,38 @@ function createSession(userId) {
         "--no-sandbox",
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
+        "--disable-accelerated-2d-canvas",
+        "--no-first-run",
+        "--no-zygote",
+        "--single-process",
         "--disable-gpu"
-      ]
-    }
+      ],
+      defaultViewport: null,
+      timeout: 120000
+    },
+    takeoverOnConflict: true,
+    takeoverTimeoutMs: 0,
+    restartOnAuthFail: true
   });
 
   client.on("qr", async (qr) => {
-    session.qr = await QRCode.toDataURL(qr);
-    session.connected = false;
-    session.status = "QR_READY";
-    console.log("QR READY:", userId);
+    try {
+      session.qr = await QRCode.toDataURL(qr);
+      session.connected = false;
+      session.status = "QR_READY";
+      session.error = null;
+      console.log("QR READY:", userId);
+    } catch (err) {
+      session.status = "QR_ERROR";
+      session.error = err.message;
+      console.log("QR ERROR:", userId, err.message);
+    }
+  });
+
+  client.on("authenticated", () => {
+    session.status = "AUTHENTICATED";
+    session.error = null;
+    console.log("AUTHENTICATED:", userId);
   });
 
   client.on("ready", () => {
@@ -60,12 +82,8 @@ function createSession(userId) {
     session.connected = true;
     session.status = "CONNECTED";
     session.number = client.info?.wid?.user || null;
+    session.error = null;
     console.log("CONNECTED:", userId, session.number);
-  });
-
-  client.on("authenticated", () => {
-    session.status = "AUTHENTICATED";
-    console.log("AUTHENTICATED:", userId);
   });
 
   client.on("auth_failure", (msg) => {
@@ -82,14 +100,17 @@ function createSession(userId) {
     console.log("DISCONNECTED:", userId, reason);
   });
 
-  client.initialize().catch((err) => {
-    session.status = "ERROR";
-    session.error = err.message;
-    console.log("INIT ERROR:", userId, err.message);
-  });
-
   session.client = client;
   sessions[userId] = session;
+
+  setTimeout(() => {
+    client.initialize().catch((err) => {
+      session.connected = false;
+      session.status = "ERROR";
+      session.error = err.message;
+      console.log("INIT ERROR:", userId, err.message);
+    });
+  }, 3000);
 
   return session;
 }
@@ -109,6 +130,7 @@ app.get("/qr/:userId", async (req, res) => {
     connected: session.connected,
     number: session.number,
     qr: session.qr,
+    error: session.error,
     message: session.connected
       ? "WhatsApp sudah terhubung"
       : session.qr
@@ -126,7 +148,9 @@ app.get("/status/:userId", (req, res) => {
       status: true,
       userId,
       connected: false,
-      waStatus: "NOT_STARTED"
+      waStatus: "NOT_STARTED",
+      number: null,
+      error: null
     });
   }
 
@@ -182,33 +206,59 @@ app.post("/send-message", async (req, res) => {
 });
 
 app.post("/logout/:userId", async (req, res) => {
+  const userId = cleanId(req.params.userId);
+  const session = sessions[userId];
+
+  if (!session) {
+    return res.json({
+      status: true,
+      message: "Session belum ada / sudah terhapus"
+    });
+  }
+
   try {
-    const userId = cleanId(req.params.userId);
-    const session = sessions[userId];
+    if (session.client) {
+      try {
+        await session.client.logout();
+      } catch (e) {}
 
-    if (!session) {
-      return res.json({
-        status: false,
-        message: "Session tidak ditemukan"
-      });
+      try {
+        await session.client.destroy();
+      } catch (e) {}
     }
-
-    await session.client.logout();
-    await session.client.destroy();
 
     delete sessions[userId];
 
     res.json({
       status: true,
-      message: "WhatsApp berhasil logout"
+      message: "Session WA berhasil direset"
     });
 
   } catch (err) {
+    delete sessions[userId];
+
     res.json({
-      status: false,
-      message: err.message
+      status: true,
+      message: "Session dihapus paksa",
+      error: err.message
     });
   }
+});
+
+app.get("/sessions", (req, res) => {
+  const list = Object.keys(sessions).map((id) => ({
+    userId: id,
+    connected: sessions[id].connected,
+    status: sessions[id].status,
+    number: sessions[id].number,
+    error: sessions[id].error
+  }));
+
+  res.json({
+    status: true,
+    total: list.length,
+    sessions: list
+  });
 });
 
 app.listen(PORT, () => {
