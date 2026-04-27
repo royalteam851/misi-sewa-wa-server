@@ -1,5 +1,7 @@
 const express = require("express");
 const cors = require("cors");
+const QRCode = require("qrcode");
+const { Client, LocalAuth } = require("whatsapp-web.js");
 
 const app = express();
 
@@ -8,43 +10,205 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// cek server hidup
+const sessions = {};
+
+function cleanId(id) {
+  return String(id || "").replace(/[^a-zA-Z0-9_-]/g, "");
+}
+
+function createSession(userId) {
+  userId = cleanId(userId);
+
+  if (sessions[userId]) {
+    return sessions[userId];
+  }
+
+  const session = {
+    userId,
+    client: null,
+    qr: null,
+    connected: false,
+    status: "STARTING",
+    number: null,
+    error: null
+  };
+
+  const client = new Client({
+    authStrategy: new LocalAuth({
+      clientId: userId
+    }),
+    puppeteer: {
+      headless: true,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu"
+      ]
+    }
+  });
+
+  client.on("qr", async (qr) => {
+    session.qr = await QRCode.toDataURL(qr);
+    session.connected = false;
+    session.status = "QR_READY";
+    console.log("QR READY:", userId);
+  });
+
+  client.on("ready", () => {
+    session.qr = null;
+    session.connected = true;
+    session.status = "CONNECTED";
+    session.number = client.info?.wid?.user || null;
+    console.log("CONNECTED:", userId, session.number);
+  });
+
+  client.on("authenticated", () => {
+    session.status = "AUTHENTICATED";
+    console.log("AUTHENTICATED:", userId);
+  });
+
+  client.on("auth_failure", (msg) => {
+    session.connected = false;
+    session.status = "AUTH_FAILURE";
+    session.error = msg;
+    console.log("AUTH FAILURE:", userId, msg);
+  });
+
+  client.on("disconnected", (reason) => {
+    session.connected = false;
+    session.status = "DISCONNECTED";
+    session.error = reason;
+    console.log("DISCONNECTED:", userId, reason);
+  });
+
+  client.initialize().catch((err) => {
+    session.status = "ERROR";
+    session.error = err.message;
+    console.log("INIT ERROR:", userId, err.message);
+  });
+
+  session.client = client;
+  sessions[userId] = session;
+
+  return session;
+}
+
 app.get("/", (req, res) => {
-  res.send("MISI SEWA WA ROYAL DREAM SERVER AKTIF");
+  res.send("MISI SEWA WA ROYAL DREAM - WA SERVER AKTIF");
 });
 
-// dummy QR dulu
-app.get("/qr/:userId", (req, res) => {
-  const userId = req.params.userId;
+app.get("/qr/:userId", async (req, res) => {
+  const userId = cleanId(req.params.userId);
+  const session = createSession(userId);
 
   res.json({
     status: true,
     userId,
-    message: "QR dummy berhasil dibuat",
-    qr: "https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=DEMO-WA-" + userId
+    waStatus: session.status,
+    connected: session.connected,
+    number: session.number,
+    qr: session.qr,
+    message: session.connected
+      ? "WhatsApp sudah terhubung"
+      : session.qr
+      ? "QR siap discan"
+      : "QR sedang dibuat, klik ulang beberapa detik lagi"
   });
 });
 
-// dummy status WA
 app.get("/status/:userId", (req, res) => {
-  res.json({
-    status: true,
-    userId: req.params.userId,
-    connected: true
-  });
-});
+  const userId = cleanId(req.params.userId);
+  const session = sessions[userId];
 
-// dummy kirim pesan
-app.post("/send-message", (req, res) => {
-  const { userId, nomor, pesan } = req.body;
+  if (!session) {
+    return res.json({
+      status: true,
+      userId,
+      connected: false,
+      waStatus: "NOT_STARTED"
+    });
+  }
 
   res.json({
     status: true,
     userId,
-    nomor,
-    pesan,
-    result: "Pesan dummy berhasil dikirim"
+    connected: session.connected,
+    waStatus: session.status,
+    number: session.number,
+    error: session.error
   });
+});
+
+app.post("/send-message", async (req, res) => {
+  try {
+    const userId = cleanId(req.body.userId);
+    const nomor = String(req.body.nomor || "").replace(/\D/g, "");
+    const pesan = String(req.body.pesan || "");
+
+    if (!userId || !nomor || !pesan) {
+      return res.json({
+        status: false,
+        message: "userId, nomor, dan pesan wajib diisi"
+      });
+    }
+
+    const session = sessions[userId];
+
+    if (!session || !session.connected) {
+      return res.json({
+        status: false,
+        message: "WhatsApp belum terhubung"
+      });
+    }
+
+    const chatId = `${nomor}@c.us`;
+
+    await session.client.sendMessage(chatId, pesan);
+
+    res.json({
+      status: true,
+      message: "Pesan berhasil dikirim",
+      userId,
+      nomor
+    });
+
+  } catch (err) {
+    res.json({
+      status: false,
+      message: err.message
+    });
+  }
+});
+
+app.post("/logout/:userId", async (req, res) => {
+  try {
+    const userId = cleanId(req.params.userId);
+    const session = sessions[userId];
+
+    if (!session) {
+      return res.json({
+        status: false,
+        message: "Session tidak ditemukan"
+      });
+    }
+
+    await session.client.logout();
+    await session.client.destroy();
+
+    delete sessions[userId];
+
+    res.json({
+      status: true,
+      message: "WhatsApp berhasil logout"
+    });
+
+  } catch (err) {
+    res.json({
+      status: false,
+      message: err.message
+    });
+  }
 });
 
 app.listen(PORT, () => {
