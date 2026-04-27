@@ -1,3 +1,5 @@
+process.env.PUPPETEER_SKIP_CHROMIUM_DOWNLOAD = "true";
+
 const express = require("express");
 const cors = require("cors");
 const QRCode = require("qrcode");
@@ -9,7 +11,6 @@ app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 
 const PORT = process.env.PORT || 3000;
-
 const sessions = {};
 
 function cleanId(id) {
@@ -45,12 +46,10 @@ function createSession(userId) {
         "--disable-dev-shm-usage",
         "--disable-accelerated-2d-canvas",
         "--no-first-run",
-        "--no-zygote",
-        "--single-process",
         "--disable-gpu"
       ],
       defaultViewport: null,
-      timeout: 120000
+      timeout: 180000
     },
     takeoverOnConflict: true,
     takeoverTimeoutMs: 0,
@@ -110,7 +109,7 @@ function createSession(userId) {
       session.error = err.message;
       console.log("INIT ERROR:", userId, err.message);
     });
-  }, 3000);
+  }, 8000);
 
   return session;
 }
@@ -119,7 +118,7 @@ app.get("/", (req, res) => {
   res.send("MISI SEWA WA ROYAL DREAM - WA SERVER AKTIF");
 });
 
-app.get("/qr/:userId", async (req, res) => {
+app.get("/qr/:userId", (req, res) => {
   const userId = cleanId(req.params.userId);
   const session = createSession(userId);
 
@@ -186,9 +185,7 @@ app.post("/send-message", async (req, res) => {
       });
     }
 
-    const chatId = `${nomor}@c.us`;
-
-    await session.client.sendMessage(chatId, pesan);
+    await session.client.sendMessage(`${nomor}@c.us`, pesan);
 
     res.json({
       status: true,
@@ -217,15 +214,13 @@ app.post("/logout/:userId", async (req, res) => {
   }
 
   try {
-    if (session.client) {
-      try {
-        await session.client.logout();
-      } catch (e) {}
+    try {
+      await session.client.logout();
+    } catch (e) {}
 
-      try {
-        await session.client.destroy();
-      } catch (e) {}
-    }
+    try {
+      await session.client.destroy();
+    } catch (e) {}
 
     delete sessions[userId];
 
@@ -246,7 +241,7 @@ app.post("/logout/:userId", async (req, res) => {
 });
 
 app.get("/sessions", (req, res) => {
-  const list = Object.keys(sessions).map((id) => ({
+  const list = Object.keys(sessions).map(id => ({
     userId: id,
     connected: sessions[id].connected,
     status: sessions[id].status,
